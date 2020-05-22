@@ -1,0 +1,387 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Glue Components
+
+Parameters:
+
+  DatabasePassword:
+    AllowedPattern: '[a-zA-Z0-9]+'
+    ConstraintDescription: must contain only alphanumeric characters. Must have length 8-41.
+    Description: Database admin account password.
+    MaxLength: '41'
+    MinLength: '8'
+    Default: 'S3cretPwd99'
+    Type: String
+
+  S3BucketName:
+    Type: String
+    Description: S3 Location to store workshop resources
+    Default: 'glue-labs-001'
+
+  StackPrefix:
+    Type: String
+    Description: Prefix to set to IAM Role Resources
+    Default: 'glue-labs'
+
+Resources:
+
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://emr-workshops-us-west-2.s3-us-west-2.amazonaws.com/glue_immersion_day/cloudformation/vpc_s3_stack.yml
+      TimeoutInMinutes: 60
+      Parameters:
+        S3BucketName: !Ref S3BucketName
+
+  SagemakerRoleWS:
+    Type: 'AWS::IAM::Role'
+    Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - sagemaker.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        RoleName: !Join [ '-', [!Ref StackPrefix, 'SagemakerRole'] ]
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/AmazonSageMakerFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonElasticMapReduceFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonRoute53ReadOnlyAccess'
+          - 'arn:aws:iam::aws:policy/AWSGlueConsoleSageMakerNotebookFullAccess'
+
+
+  DMSCloudwatchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: dms-cloudwatch-logs-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - dms.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonDMSCloudWatchLogsRole'
+      Path: /
+      RoleName: !Join [ '-', [!Ref StackPrefix, 'DMSCloudwatchRole'] ]
+
+  DMSS3TargetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'dms-s3-target-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - dms.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      RoleName: !Join [ '-', [!Ref StackPrefix, 'DMSS3TargetRole'] ]
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonDMSVPCManagementRole'
+      Path: /
+      Policies:
+        - PolicyName: DMSS3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:PutObjectTagging
+                  - s3:DeleteObject
+                Resource: !Join [ '', [ 'arn:aws:s3:::', !GetAtt VPCStack.Outputs.BucketName, '/*' ] ]
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Join [ '', [ 'arn:aws:s3:::', !GetAtt VPCStack.Outputs.BucketName ] ]
+
+  DMSReplicationSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: 'AWS Glue Workshop DMSReplicationSubnetGroup'
+      ReplicationSubnetGroupIdentifier: !Join [ '-', [!Ref StackPrefix, 'DMSReplicationSubnetGroup'] ]
+      SubnetIds:
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet1Id'
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet2Id'
+
+  DMSReplicationInstance:
+    Type: "AWS::DMS::ReplicationInstance"
+    DependsOn: AuroraCluster
+    Properties:
+      AllocatedStorage: 100
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: dms.t2.large
+      ReplicationSubnetGroupIdentifier : !Ref DMSReplicationSubnetGroup
+      Tags:
+        - Key: Name
+          Value: DMS-Replication-Instance
+      VpcSecurityGroupIds:
+        - !GetAtt 'VPCStack.Outputs.WorkshopSecurityGroup'
+
+  AuroraDMSSourceEndpoint:
+    Type: 'AWS::DMS::Endpoint'
+    DependsOn:
+      - DMSReplicationInstance
+      - AuroraCluster
+      - AuroraDB
+    Properties:
+      EndpointType: source
+      EngineName: AURORA
+      Username: master
+      Password: !Ref DatabasePassword
+      Port: 3306
+      ServerName: !GetAtt
+        - AuroraCluster
+        - Endpoint.Address
+      Tags:
+        - Key: Name
+          Value: 'Aurora-Source-Endpoint'
+
+  S3DMSTargetEndpoint:
+    Type: 'AWS::DMS::Endpoint'
+    DependsOn:
+      - DMSReplicationInstance
+    Properties:
+      EndpointType: target
+      EngineName: S3
+      ExtraConnectionAttributes: DataFormat=parquet;parquetTimestampInMillisecond=true;
+      S3Settings:
+        BucketName: !GetAtt VPCStack.Outputs.BucketName
+        BucketFolder: "dms-full-load-path/"
+        CompressionType: NONE
+        CsvDelimiter: ','
+        CsvRowDelimiter: '\n'
+        ServiceAccessRoleArn: !GetAtt DMSS3TargetRole.Arn
+      Tags:
+        - Key: Name
+          Value: 'S3-Target-Endpoint'
+
+  DMSReplicationTask:
+    Type: 'AWS::DMS::ReplicationTask'
+    DependsOn:
+      - AuroraDMSSourceEndpoint
+      - S3DMSTargetEndpoint
+      - DMSReplicationInstance
+    Properties:
+      MigrationType: full-load-and-cdc
+      ReplicationInstanceArn: !Ref DMSReplicationInstance
+      ReplicationTaskSettings: >-
+        { "Logging" : { "EnableLogging" : true, "LogComponents": [ { "Id" :
+        "SOURCE_UNLOAD", "Severity" : "LOGGER_SEVERITY_DEFAULT" }, { "Id" :
+        "SOURCE_CAPTURE", "Severity" : "LOGGER_SEVERITY_DEFAULT" }, { "Id" :
+        "TARGET_LOAD", "Severity" : "LOGGER_SEVERITY_DEFAULT" }, { "Id" :
+        "TARGET_APPLY", "Severity" : "LOGGER_SEVERITY_DEFAULT" } ] } }
+      SourceEndpointArn: !Ref AuroraDMSSourceEndpoint
+      TargetEndpointArn: !Ref S3DMSTargetEndpoint
+      TableMappings: "{\"rules\": [{\"rule-type\": \"selection\", \"rule-id\": \"1\", \"rule-action\": \"include\", \"object-locator\": {\"schema-name\": \"salesdb\", \"table-name\": \"%\"}, \"rule-name\": \"1\"}]}"
+      Tags:
+        - Key: "Name"
+          Value: 'AuroraMySQl-2-S3'
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: CloudFormation managed DB subnet group.
+      SubnetIds:
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet1Id'
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet2Id'
+
+  AuroraDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Hudi Worshop DB parameter group
+      Family: aurora-mysql5.7
+      Parameters:
+        max_connections: 300
+
+  AuroraDBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: 'CloudFormation Sample Aurora Cluster Parameter Group'
+      Family: aurora-mysql5.7
+      Parameters:
+        time_zone: US/Eastern
+        binlog_format: ROW
+        binlog_checksum: NONE
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    DependsOn:
+      - DatabaseSubnetGroup
+    Properties:
+      Engine: aurora-mysql
+      MasterUsername: 'master'
+      MasterUserPassword: !Ref DatabasePassword
+      DatabaseName: 'salesdb'
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBClusterParameterGroupName: !Ref AuroraDBClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !GetAtt 'VPCStack.Outputs.WorkshopSecurityGroup'
+
+  AuroraDB:
+    Type: AWS::RDS::DBInstance
+    DependsOn: AuroraCluster
+    Properties:
+      Engine: aurora-mysql
+      DBClusterIdentifier: !Ref AuroraCluster
+      DBInstanceClass: db.r5.large
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref AuroraDBParameterGroup
+      PubliclyAccessible: 'false'
+      DBInstanceIdentifier: !Join [ '-', [!Ref StackPrefix, 'salesdb'] ]
+      Tags:
+        - Key: 'Name'
+          Value: !Ref AWS::StackName
+
+  GlueServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - glue.amazonaws.com
+                  - states.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        RoleName: !Join [ '-', [!Ref StackPrefix, 'GlueServiceRole'] ]
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+          - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonElasticMapReduceFullAccess'
+          - 'arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonAthenaFullAccess'
+
+
+  GlueDevEndpoint:
+    Type: AWS::Glue::DevEndpoint
+    Properties:
+      EndpointName: !Join [ '-', [!Ref StackPrefix, 'Glue-Dev-Endpoint'] ]
+      Arguments: { "--enable-glue-datacatalog": "" }
+      GlueVersion: 1.0
+      #NumberOfNodes: 3
+      NumberOfWorkers: 3
+      RoleArn: !GetAtt
+        - GlueServiceRole
+        - Arn
+      SecurityGroupIds:
+        - !GetAtt 'VPCStack.Outputs.WorkshopSecurityGroup'
+      SubnetId: !GetAtt 'VPCStack.Outputs.PublicSubnet1Id'
+      WorkerType: Standard
+
+
+  GlueSagemakerNotebookInstance:
+    Type: 'AWS::SageMaker::NotebookInstance'
+    DependsOn:
+      - GlueSagemakerRole
+      #- SagemakerLifecycleConfig
+      - GlueDevEndpoint
+    Properties:
+      DirectInternetAccess: Enabled
+      LifecycleConfigName: !GetAtt GlueSagemakerLifecycleConfig.NotebookInstanceLifecycleConfigName
+      SubnetId: !GetAtt 'VPCStack.Outputs.PublicSubnet1Id'
+      NotebookInstanceName: !Join [ '-', [!Ref StackPrefix, 'glue-development-notebook'] ]
+      InstanceType: ml.t2.medium
+      RoleArn: !GetAtt
+        - GlueSagemakerRole
+        - Arn
+      SecurityGroupIds:
+        - !GetAtt 'VPCStack.Outputs.WorkshopSecurityGroup'
+      Tags:
+        - Key: aws-glue-dev-endpoint
+          Value: !Join [ '-', [!Ref StackPrefix, 'Glue-Dev-Endpoint'] ]
+
+  GlueSagemakerLifecycleConfig:
+    Type: "AWS::SageMaker::NotebookInstanceLifecycleConfig"
+    Properties:
+      NotebookInstanceLifecycleConfigName: SageMaker-Glue-LifecycleConfig
+      OnStart:
+        - Content:
+            Fn::Base64: !Sub |
+
+              sudo -u ec2-user -i <<'EOF'
+              ## Download and execute lifecycle script
+              aws s3 cp s3://emr-workshops-us-west-2/glue_immersion_day/scripts/sagemaker_glue_lifecycle.sh /home/ec2-user/scripts/
+              chmod +x /home/ec2-user/scripts/sagemaker_glue_lifecycle.sh
+              /home/ec2-user/scripts/sagemaker_glue_lifecycle.sh ${StackPrefix}
+
+              EOF
+
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    DependsOn:
+      - RedshiftClusterSubnetGroup
+    Properties:
+      ClusterType: single-node
+      NodeType: dc2.large
+      DBName: sales_analytics_dw
+      MasterUsername: 'awsuser'
+      MasterUserPassword: !Ref DatabasePassword
+      ClusterIdentifier: !Join [ '-', [!Ref StackPrefix, 'redshift-cluster'] ]
+      #ClusterParameterGroupName:
+      #  Ref: RedshiftClusterParameterGroup
+      VpcSecurityGroupIds:
+        - !GetAtt 'VPCStack.Outputs.WorkshopSecurityGroup'
+      ClusterSubnetGroupName: !Ref RedshiftClusterSubnetGroup
+      PubliclyAccessible: 'false'
+      Port: 5439
+
+
+  # RedshiftClusterParameterGroup:
+  #   Type: AWS::Redshift::ClusterParameterGroup
+  #   Properties:
+  #     Description: Cluster parameter group
+  #     ParameterGroupFamily: redshift-1.0
+  #     Parameters3
+  #     - ParameterName: enable_user_activity_logging
+  #       ParameterValue: 'true'
+
+
+  RedshiftClusterSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Redshift Cluster subnet group
+      SubnetIds:
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet1Id'
+        - !GetAtt 'VPCStack.Outputs.PublicSubnet2Id'
+
+
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Join [ '-', [!Ref StackPrefix, 'Glue_Lab_Event_Stream'] ]
+      ShardCount: 2
+
+  GlueSagemakerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+        AssumeRolePolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - sagemaker.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        ManagedPolicyArns:
+          - 'arn:aws:iam::aws:policy/AmazonSageMakerFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonElasticMapReduceFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonRoute53ReadOnlyAccess'
+          - 'arn:aws:iam::aws:policy/AWSGlueConsoleSageMakerNotebookFullAccess'
+          - 'arn:aws:iam::aws:policy/AmazonAthenaFullAccess'
