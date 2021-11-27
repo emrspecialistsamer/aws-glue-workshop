@@ -42,10 +42,33 @@ if ! [ -e /home/ec2-user/glue_ready ]; then
     mkdir -p /home/ec2-user/SageMaker/Glue\ Examples
     mv /home/ec2-user/glue/notebook-samples/* /home/ec2-user/SageMaker/Glue\ Examples/
 
-    # Run daemons as cron jobs and use flock make sure that daemons are started only iff stopped
-    (crontab -l; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-v2-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-v2-dev-endpoint-daemon.sh") | crontab -
+    echo "ensure SageMaker notebook has permission to access regional endpoint"
+    aws glue get-dev-endpoint --endpoint-name ${stackPrefix}-Glue-Dev-Endpoint --region ${REGION}
 
-    (crontab -l; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-reconnect-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-reconnect-dev-endpoint-daemon.sh") | crontab -
+    set +e
+    echo "Run daemons as cron jobs and use flock to make sure that daemons are started only if stopped"
+    (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-v2-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-v2-dev-endpoint-daemon.sh") | crontab -
+    (crontab -l 2>/dev/null; echo "* * * * * /usr/bin/flock -n /tmp/lifecycle-config-reconnect-dev-endpoint-daemon.lock /usr/bin/sudo /bin/sh /home/ec2-user/glue/lifecycle-config-reconnect-dev-endpoint-daemon.sh") | crontab -
+    crontab -l
+
+    echo "Wait for Glue dev endpoint connection to be reachable ..."
+    LIVY_SERVER="http://localhost:8998"
+    timeout=$((5*60))
+    while (true); do
+        echo "Connecting to Glue Dev Endpoint: $LIVY_SERVER"
+        curl -s $LIVY_SERVER
+        if [ $? -eq 0 ]; then 
+            echo "$LIVY_SERVER is reachable"
+            break; 
+        fi
+        sleep 20
+        ((timeout -= 20))
+        if [[ $timeout -lt 0 ]]; then
+            echo "ERROR: $LIVY_SERVER is unreachable"
+            exit 1
+        fi
+    done
+    set -e
 
     source "/home/ec2-user/glue/miniconda/bin/deactivate"
 
@@ -114,6 +137,13 @@ sed -i "s/###s3_bucket###/$s3_bucket/" /home/ec2-user/SageMaker/Module3/1_Using_
 sed -i "s/###iam_role###/$iam_role/" /home/ec2-user/SageMaker/Module3/1_Using_AWS_Glue_Python_Shell_Jobs.ipynb
 
 ## Rename the Modules
-mv /home/ec2-user/SageMaker/Module1 /home/ec2-user/SageMaker/"Module 1 : Building a DataLake using AWS Glue"
-mv /home/ec2-user/SageMaker/Module2 /home/ec2-user/SageMaker/"Module 2 : Incremental data processing from OLTP Database to DataWarehouse"
-mv /home/ec2-user/SageMaker/Module3 /home/ec2-user/SageMaker/"Module 3 : Using AWS Glue Python Shell Jobs"
+mod1='Module 1 : Building a DataLake using AWS Glue'
+mod2='Module 2 : Incremental data processing from OLTP Database to DataWarehouse'
+mod3='Module 3 : Using AWS Glue Python Shell Jobs'
+cd /home/ec2-user/SageMaker
+rm -rf "$mod1" "$mod2" "$mod3"
+mv /home/ec2-user/SageMaker/Module1 "$mod1"
+mv /home/ec2-user/SageMaker/Module2 "$mod2"
+mv /home/ec2-user/SageMaker/Module3 "$mod3"
+
+
