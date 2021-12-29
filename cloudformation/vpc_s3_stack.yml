@@ -1,10 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Stack 1: Deploy VPC with 3 public subnet, Security Group, S3 and Route53 Private Hosted Zone'
+Description: 'Stack 1: Deploy VPC with 3 public subnet, Security Group, S3 and Route53 Private Hosted Zone (v2)'
 
 Parameters:
-    S3BucketName:
-      Type: String
-      Description: S3 Location to store workshop resources
+  S3BucketName:
+    Type: String
+    Description: S3 Location to store workshop resources
+
+  StackPrefix:
+    Type: String
+    Description: Prefix for resource names 
 
 Resources:
   VPC:
@@ -134,7 +138,7 @@ Resources:
   EMRSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: EMRSecurityGroup
+      GroupName: !Join [ '-', [!Ref StackPrefix, 'EMRSecurityGroup'] ]
       GroupDescription: Enable SSH access via port 22
       VpcId: !Ref VPC
       SecurityGroupEgress:
@@ -158,7 +162,7 @@ Resources:
   WorkshopSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: WorkshopSecurityGroup
+      GroupName: !Join [ '-', [!Ref StackPrefix, 'WorkshopSecurityGroup'] ]
       GroupDescription: Enable SSH access via port 22
       VpcId: !Ref VPC
       SecurityGroupEgress:
@@ -176,7 +180,6 @@ Resources:
     Properties:
       AccessControl: BucketOwnerFullControl
       BucketName: !Join [ '-', [!Ref S3BucketName, !Ref 'AWS::AccountId'] ]
-
 
   S3VPCEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -200,7 +203,7 @@ Resources:
   DMSVpcRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: dms-vpc-role
+      RoleName: !Join [ '-', [!Ref StackPrefix, 'dms-vpc-role'] ]
       AssumeRolePolicyDocument:
         Version : '2012-10-17'
         Statement:
