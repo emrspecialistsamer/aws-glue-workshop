@@ -12,7 +12,7 @@ bucket=get_argument_value("--S3_BUCKET")
 
 default_output=f's3://{bucket}/athena-sql/data/output/'
 default_write_location=f's3://{bucket}/athena-sql/data/'
-default_script_location= f'3://{bucket}/scripts/'
+default_script_location= f's3://{bucket}/scripts/'
 default_script_logs_location = f's3://{bucket}/athena-sql/logs/'
 sql_script_file='athena-sql-script.sql'
 
